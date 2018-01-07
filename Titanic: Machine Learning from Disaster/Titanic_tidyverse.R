@@ -1,0 +1,105 @@
+# Titanic in tidyverse, wihtout visualizations
+#installing the libraries
+library(tidyverse)
+#Load the data
+titanic_train <- read_csv('data/train.csv')
+titanic_test <- read_csv('data/test.csv')
+class(titanic_train)
+#glimpse is analogue to str() is basic R.
+glimpse(titanic_train)
+glimpse(titanic_test) #No survival column
+
+#Check the differences between names of the columns
+
+setdiff(names(titanic_train), names(titanic_test))
+#How many survived in percents
+summarise(titanic_train, SurvivalRate = sum(Survived)/nrow(titanic_train)*100)
+titanic <- full_join(titanic_train, titanic_test)
+glimpse(titanic)
+
+library(forcats)
+titanic <- titanic %>%
+  mutate(Survived = factor(Survived)) %>%
+  mutate(Survived = fct_recode(Survived, "No" = "0", "Yes" = "1"))
+
+#Feature engineering
+titanic <- titanic %>%
+  mutate(Sex = factor(Sex)) %>%
+  mutate(Sex = fct_recode(Sex, "Female" = "female", "Male" = "male"))
+
+#Extract the titles
+library(stringr)
+
+titanic <- mutate(titanic, Title = str_sub(Name, str_locate(Name,",")[,1] + 2, str_locate(Name,"\\.")[,1] -1))
+
+titanic %>% group_by(Title) %>%
+  summarise(count=n()) %>%
+  arrange(desc(count))
+
+#Identify mothers
+titanic <- titanic %>%
+  mutate(Mother = factor(ifelse(c(titanic$Title == "Mrs" | titanic$Title=="Mme" |titanic$Title 
+                                  == "the Countess" | titanic$Title == "Dona" | titanic$Title
+                                  == "Lady")& titanic$Parch >0, "Yes", "No")))
+titanic <- titanic %>%
+  mutate(Title = factor(Title)) %>%
+  mutate(Title = fct_collapse(Title, "Miss" = c("Mlle", "Ms"), "Mrs" = "Mme", 
+                              "Ranked" = c( "Major", "Dr", "Capt", "Col", "Rev"),
+                              "Royalty" = c("Lady", "Dona", "the Countess", "Don", "Sir", "Jonkheer"))) 
+
+titanic <- mutate(titanic, Solo = factor(ifelse(SibSp + Parch + 1 == 1, "Yes", "No")))
+titanic <- titanic %>% 
+  mutate(FamilySize = SibSp + Parch + 1) %>% 
+  mutate(FamilyType = factor(ifelse(FamilySize > 4, "Large", ifelse(FamilySize == 1, "Single", "Medium"))))
+
+#Missing values
+
+library(VIM)
+
+titanic %>% map_dbl(~sum(is.na(.)))
+aggr(titanic, prop = FALSE, combined = TRUE, numbers = TRUE, sortVars = TRUE, sortCombs = TRUE)
+
+filter(titanic, is.na(Embarked))
+filter(titanic, is.na(Fare))
+
+titanic %>% group_by(Pclass, Embarked) %>%
+  summarise(count = n(), median_fare = median(Fare, na.rm=TRUE))
+
+titanic <- titanic %>%
+  mutate(Embarked = factor(ifelse(is.na(Embarked), names(which.max(table(titanic$Embarked))), Embarked))) %>%
+  group_by(Pclass, Embarked) %>%
+  mutate(Fare = ifelse(is.na(Fare), round(median(Fare, na.rm = TRUE), 4), Fare))
+
+titanic %>% group_by(Title) %>%
+  summarise(median = median(Age, na.rm = TRUE))
+
+titanic <- titanic %>%
+  group_by(Title) %>%
+  mutate(Age = ifelse(is.na(Age), round(median(Age, na.rm = TRUE), 1), Age)) 
+
+#titanic <- mutate(titanic, LifeStage = factor(ifelse(Age < 18, "Child", "Adult")))
+titanic <- select(titanic, -c(Name, Ticket, Cabin)) %>%
+  glimpse()
+
+#Building the model
+
+train <- titanic[1:891,]
+test <- titanic[892:1309,]
+
+library(party)
+
+set.seed(144)
+cf_model <- cforest(Survived ~ Sex + Age + SibSp + Parch + 
+                      log(Fare) + Embarked + Pclass + Title + Mother + 
+                      Solo + FamilySize + FamilyType,
+                    data = train, 
+                    controls = cforest_unbiased(ntree = 2000, mtry = 3)) 
+
+xtab <- table(predict(cf_model), train$Survived)
+library(caret) 
+confusionMatrix(xtab)
+varimp(cf_model)
+cf_prediction <- predict(cf_model, test, OOB=TRUE, type = "response")
+cf_prediction <- ifelse(cf_prediction == "No", 0, 1)
+cf_solution <- data.frame(PassengerID = test$PassengerId, Survived = cf_prediction)
+write.csv(cf_solution, file = 'tidyverse_Titanic.csv', row.names = F)
